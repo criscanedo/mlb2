@@ -20,9 +20,8 @@
  */
 
 #define _BSD_SOURCE
-#define _POSIX_C_SOURCE 200809L
-#define _XOPEN_SOURCE 500
 
+#include <assert.h>
 #include <stdint.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -33,36 +32,52 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <stdlib.h>
-#include <linux/fiemap.h>
-#include <linux/fs.h>
-#include <sys/ioctl.h>
 #include <stdbool.h>
 #include <stdio.h>
 
-#include "mlb_bin.h"
+extern char _binary_mlb_bin_start;
+extern char _binary_mlb_bin_end;
+
+static const char *
+mlb_bin(void)
+{
+	return (const char *)&_binary_mlb_bin_start;
+}
+
+static size_t
+mlb_bin_len(void)
+{
+	size_t diff = (size_t)(&_binary_mlb_bin_end - &_binary_mlb_bin_start);
+	if (diff > 510)
+		errx(1, "mlb binary section too large: %llu", (unsigned long long)diff);
+	if (!diff)
+		errx(1, "mlb binary section empty?");
+	return diff;
+}
 
 /* Checks if the kernel boot protocol is supported */
-void check_version(const char *kernel)
+static void check_version(const char *target, uint32_t kernlba)
 {
-	int fd = open(kernel, O_RDONLY);
+	int fd = open(target, O_RDONLY);
 	if (fd == -1)
-		err(1, "Failed opening %s", kernel);
+		err(1, "Failed opening %s", target);
 
 	long ps = sysconf(_SC_PAGESIZE);
 	size_t mlength = (512 / ps + 1) * ps;
-	uint8_t *m = mmap(NULL, mlength, PROT_READ, MAP_PRIVATE, fd, 0);
+	uint8_t *m = mmap(NULL, mlength, PROT_READ, MAP_PRIVATE, fd, (off_t)kernlba << 9);
 	if (m == MAP_FAILED)
-		err(1, "Failed mapping %s", kernel);
+		err(1, "Failed mapping %s", target);
 
+	/* TODO - portability */
 	uint32_t header = *(uint32_t *)(m + 0x202);
 	uint16_t version = be16toh(*(uint16_t *)(m + 0x206));
 	uint8_t loadflags = m[0x211];
 
 	if (header != 0x53726448)
-		errx(1, "%s is missing a Linux kernel header", kernel);
+		errx(1, "%s is missing a Linux kernel header", target);
 	if (version < 0x204)
 		errx(1, "Kernel too old, boot protocol version >= 0x204/\
-kernel version >= 2.6.14 required, but %s is 0x%x", kernel, version);
+kernel version >= 2.6.14 required, but %s is 0x%x", target, version);
 	if (!(loadflags & 0x01))
 		errx(1, "Kernel needs to be loaded high");
 
@@ -71,150 +86,88 @@ kernel version >= 2.6.14 required, but %s is 0x%x", kernel, version);
 }
 
 /* Returns the length of cmdline, including the terminating null. */
-uint16_t cmdlen(const char *cmdline, size_t mlblen, size_t mbrlen)
+static uint16_t cmdlen(const char *cmdline, size_t mlblen, size_t mbrlen)
 {
 	/* Note the last byte of mlb.bin is 0, reserved for cmdline. */
+	assert(mbrlen > mlblen);
 	size_t maxlen = mbrlen - mlblen + 1;
 	size_t len = strnlen(cmdline, maxlen);
-	if (len == maxlen)
+	if (len >= maxlen)
 		errx(1, "Command line too long, max length: %lu", maxlen);
-	return len + 1;
-}
-
-/* Returns the kernel file LBA. */
-uint32_t lba(const char *fn)
-{
-	int fd = open(fn, O_RDONLY);
-	if (fd == -1)
-		err(1, "Failed opening %s", fn);
-
-	struct fiemap *fm = calloc(1,
-	                 sizeof(struct fiemap) + sizeof(struct fiemap_extent));
-	if (!fm)
-		err(1, "Failed to allocate memory");
-	fm->fm_length = ~0ull;
-	fm->fm_flags = FIEMAP_FLAG_SYNC;
-	fm->fm_extent_count = 1;
-	if (ioctl(fd, FS_IOC_FIEMAP, fm) == -1)
-		err(1, "ioctl failed");
-	if (close(fd))
-		err(1, "Failed closing %s", fn);
-
-	/*
-	 * Some messages from <linux/fiemap.h>.
-	 * TODO: Write better messages.
-	 */
-	bool error = false;
-	if (!(fm->fm_extents[0].fe_flags & FIEMAP_EXTENT_LAST)) {
-		warnx("%s is fragmented", fn);
-		error = true;
-	}
-	if (fm->fm_extents[0].fe_flags & FIEMAP_EXTENT_UNKNOWN) {
-		warnx("%s: Data location unknown", fn);
-		error = true;
-	}
-	if (fm->fm_extents[0].fe_flags & FIEMAP_EXTENT_DELALLOC) {
-		warnx("%s: Location still pending", fn);
-		error = true;
-	}
-	if (fm->fm_extents[0].fe_flags & FIEMAP_EXTENT_ENCODED) {
-		warnx("%s: Data can not be read while fs is unmounted", fn);
-		error = true;
-	}
-	if (fm->fm_extents[0].fe_flags & FIEMAP_EXTENT_DATA_ENCRYPTED) {
-		warnx("%s: Data is encrypted by fs", fn);
-		error = true;
-	}
-	if (fm->fm_extents[0].fe_flags & FIEMAP_EXTENT_NOT_ALIGNED) {
-		warnx("%s: Extent offsets may not be block aligned", fn);
-		error = true;
-	}
-	if (fm->fm_extents[0].fe_flags & FIEMAP_EXTENT_UNWRITTEN) {
-		warnx("%s: Space allocated, but no data (i.e. zero)", fn);
-		error = true;
-	}
-	if (fm->fm_extents[0].fe_physical / 512 > ~0u) {
-		warnx("%s is further than 2 TB into the disk", fn);
-		error = true;
-	}
-	if (error)
-		errx(1, "%s is unbootable due to condition(s) above", fn);
-
-	/* TODO: Make this more portable. */
-	uint32_t lba = fm->fm_extents[0].fe_physical / 512;
-	free(fm);
-	return lba;
-}
-
-/* Copies MLB code to the MBR buffer. */
-void mlbcopy(uint8_t *mbr, unsigned char *mlb, size_t mlblen)
-{
-	memcpy(mbr, mlb, mlblen);
-}
-
-/* Copies the kernel LBA to the MBR buffer. */
-void lbacopy(uint8_t *mbr, size_t mlblen, uint32_t lba)
-{
-	memcpy(mbr + mlblen - 5, &lba, 4);
+	return (uint16_t)(len + 1);
 }
 
 /* Copies the kernel command line to the MBR buffer. */
-void cmdcopy(uint8_t *mbr, size_t mlblen, const char *cmd, uint16_t clen)
+static void cmdcopy(uint8_t *mbr, size_t mlblen, const char *cmd, uint16_t clen)
 {
-	memcpy(mbr + mlblen - 1, cmd, clen);
-	for (size_t i = 0; i < mlblen - 1; ++i)
-		if (mbr[i] == 0xca && mbr[i + 1] == 0xfe)
-			memcpy(mbr + i, &clen, 2);
+	assert(clen < (510 - mlblen));
+	memmove(mbr + mlblen - 1, cmd, clen);
+	bool sawit = false;
+	for (size_t i = 0; i < mlblen - 1; ++i) {
+		if (mbr[i] == 0xca && mbr[i + 1] == 0xfe) {
+			mbr[i+0] = (uint8_t)(clen & 0xff);
+			mbr[i+1] = (uint8_t)((clen >> 8) & 0xff);
+			sawit = true;
+		}
+	}
+	if (!sawit)
+		errx(1, "didn't see 0xcafe cmdline length sigil");
 }
 
 /* Writes the MBR buffer to the target MBR. */
-void mbrwrite(const char *target, uint8_t *mbr)
+static void mbrwrite(const char *target, uint8_t *mbr)
 {
-	FILE *f = fopen(target, "r+");
-	if (!f)
+	unsigned char buf[2];
+	int fd = open(target, O_WRONLY);
+	if (fd == -1)
 		err(1, "Failed opening %s", target);
-	if (!fwrite(mbr, 446, 1, f))
-		err(1, "%s: Failed writing the MBR", target);
-	if (fseek(f, 510, 0))
-		err(1, "%s: Failed seeking to write the magic value", target);
-	uint16_t magic = 0xaa55;
-	if (!fwrite(&magic, 2, 1, f))
-		err(1, "%s: Failed writing the magic value", target);
-	if (fclose(f))
-		err(1, "Failed closing %s", target);
-	sync();
+	if (pwrite(fd, mbr, 446, 0) != 446)
+		err(1, "%s: failed writing MBR", target);
+	buf[0] = 0x55;
+	buf[1] = 0xaa;
+	if (pwrite(fd, buf, 2, 510) != 2)
+		err(1, "%s: failed writing MBR boot magic", target);
+	close(fd);
 }
 
 int main(int argc, char **argv)
 {
-	/* Check for -vbr first to avoid calling strncmp twice */
-	bool vbr = false;
-	if (argc == 5 && !strncmp(argv[4], "-vbr", 5))
-		vbr = true;
+	const char *target, *kern, *cmdline;
+	uint8_t mbr[510];
 
-	if ((argc != 4 && argc != 5) || (argc == 5 && !vbr))
-		errx(1, "Usage: %s <target> <kernel> <command line> [-vbr]\n\
+	if (argc != 4)
+		errx(1, "Usage: %s <target> <kernel> <command line> \n\
 Configures MLB to boot the kernel with the command line and installs it on\n\
 target (could be a file, a block device, ...). Specify -vbr as the last\n\
 argument to not reserve space for a partition table and gain an extra\n\
 64 bytes for the command line.\n", argv[0]);
 
-	const char *target = argv[1];
-	const char *kernel = argv[2];
-	const char *cmdline = argv[3];
+	target = argv[1];
+	kern = argv[2];
+	cmdline = argv[3];
 
-	check_version(kernel);
+	size_t mbr_len = 446;
+	size_t mlb_len = mlb_bin_len();
+	assert(mlb_len < mbr_len);
+	const char *mlb = mlb_bin();
+	uint16_t cmdline_len = cmdlen(cmdline, mlb_len, (uint16_t)mbr_len);
+	uint32_t lba = (uint32_t)strtoul(kern, NULL, 0);
 
-	size_t mbr_len = vbr ? 510 : 446;
-	uint16_t cmdline_len = cmdlen(cmdline, mlb_bin_len, mbr_len);
-	uint32_t kernel_lba = lba(kernel);
+	check_version(target, lba);
 
-	uint8_t mbr[510];
-	memset(mbr, 0, mbr_len);
-	mlbcopy(mbr, mlb_bin, mlb_bin_len);
-	lbacopy(mbr, mlb_bin_len, kernel_lba);
-	cmdcopy(mbr, mlb_bin_len, cmdline, cmdline_len);
+	memset(mbr, 0, sizeof(mbr));
+	/* for reasons I cannot discern, gcc 9.3.0
+	 * triggers a SIGILL when this is replaced with
+	 * a call to memmove() ... */
+	for (int i=0; i<mlb_len; i++)
+		mbr[i]=mlb[i];
+	mbr[mlb_len - 5] = (uint8_t)(lba & 0xff);
+	mbr[mlb_len - 4] = (uint8_t)((lba >> 8) & 0xff);
+	mbr[mlb_len - 3] = (uint8_t)((lba >> 16) & 0xff);
+	mbr[mlb_len - 2] = (uint8_t)((lba >> 24) & 0xff);
+
+	cmdcopy(mbr, mlb_len, cmdline, cmdline_len);
 
 	mbrwrite(target, mbr);
+	return 0;
 }
-

@@ -1,13 +1,30 @@
-all: mlbinstall
+CC ?= gcc
+CFLAGS ?= -O2 -pedantic -Wall -fno-strict-aliasing
+LDFLAGS ?=
+LD ?= ld
+NASM ?= nasm
+VERSION := 0.1
+
+.PHONY: all install clean tarball
+
+all: mlb2install
 
 mlb.bin: mlb.asm
-	nasm -o $@ $<
+	$(NASM) -o $@ $<
 
-mlb_bin.h: mlb.bin
-	xxd -i $< $@
+mlb.o: mlb.bin
+	$(LD) -r -b binary $< -o $@
 
-mlbinstall: mlbinstall.c mlb_bin.h
-	gcc -std=c99 -pedantic -Wall -o $@ $<
+mlb2install: mlb.o mlbinstall.c
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+
+mlb2-$(VERSION).tar.zst:
+	git archive --format=tar --prefix=mlb2-$(VERSION)/ HEAD | zstd -c -o $@
+
+install: mlb2install
+	install -D -m 755 -t $(DESTDIR)$(PREFIX)/sbin mlb2install
+
+tarball: mlb2-$(VERSION).tar.zst
 
 clean:
-	rm mlbinstall mlb.bin mlb_bin.h
+	$(RM) mlb2install mlb.bin mlb.o
