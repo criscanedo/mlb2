@@ -7,6 +7,7 @@
 
 ; Copyright (C) 2012 Sebastian Plotz
 ; Copyright (C) 2014 Wiktor W Brodlo
+; Copyright (C) 2020 Phil Hofer
 
 ; Minimal Linux Bootloader is free software: you can redistribute it and/or modify
 ; it under the terms of the GNU General Public License as published by
@@ -130,20 +131,25 @@ run_kernel:
 	jmp	0x1020:0
 
 read_from_hdd:
-
 	push	edx
-	mov	[dap.count], ax
-	mov	[dap.offset], bx
-	mov	[dap.segment], cx
-	mov	edx, [current_lba]
-	mov	[dap.lba], edx
-	add	[current_lba], eax		; update current_lba
+
+	; Data Address Packet generation:
+	push dword 0x0             ; end of DAP: high bits of lba (zeros)
+	mov	edx, [current_lba] ;
+	add	[current_lba], eax ; update current_lba
+	push    edx		   ; lba (low bits)
+	push    cx		   ; destination segment
+	push    bx		   ; destination offset
+	push    ax		   ; number of sectors
+	push word 0x10             ; size of packet
+
 	mov	ah, 0x42
-	mov	si, dap
-	mov	dl, 0x80			; first hard disk
+	mov	si, sp 	 ; DAP is on the stack
+	mov	dl, 0x80 ; first hard disk
 	int	0x13
 	mov	al, 'R'
 	jc	error
+	add     sp, 0x10
 	pop	edx
 	ret
 
@@ -189,22 +195,6 @@ gdt:
 	db	0x93				; data access rights
 	dw	0
 	times	16	db	0
-
-; Disk Address Packet
-
-dap:
-
-	db	0x10				; size of DAP
-	db	0				; unused
-.count:
-	dw	0				; number of sectors
-.offset:
-	dw	0				; destination: offset
-.segment:
-	dw	0				; destination: segment
-.lba:
-	dd	0				; low bytes of LBA address
-	dd	0				; high bytes of LBA address
 
 current_lba	dd	0xefbeadde		; mlbinstall replaces this with the kernel LBA
 cmd_line	db	0

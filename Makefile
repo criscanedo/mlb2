@@ -3,7 +3,7 @@ CFLAGS ?= -O2 -pedantic -Wall -fno-strict-aliasing
 LDFLAGS ?=
 LD ?= ld
 NASM ?= nasm
-VERSION := 0.1
+VERSION := 0.2
 
 .PHONY: all install clean tarball
 
