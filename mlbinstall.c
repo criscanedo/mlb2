@@ -136,11 +136,10 @@ int main(int argc, char **argv)
 	uint8_t mbr[510];
 
 	if (argc != 4)
-		errx(1, "Usage: %s <target> <kernel> <command line> \n\
-Configures MLB to boot the kernel with the command line and installs it on\n\
-target (could be a file, a block device, ...). Specify -vbr as the last\n\
-argument to not reserve space for a partition table and gain an extra\n\
-64 bytes for the command line.\n", argv[0]);
+		errx(1, "Usage: %s <target> <kernel-lba> <command line> \n\
+- <target>: where you want your bootloader installed\n\
+- <kernel-lba>: LBA (in 512-byte sectors) of the kernel within target device\n\
+- <command line>: command line to pass to the kernel (<= 99 bytes)\n", argv[0]);
 
 	target = argv[1];
 	kern = argv[2];
